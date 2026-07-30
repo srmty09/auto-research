@@ -75,35 +75,72 @@ class CodeExecutionTool:
 
 
 class FileTool:
-    def __init__(self):
-        self.workspace = Path(os.path.join(os.path.dirname(__file__), "..", "workspace"))
-        self.workspace.mkdir(exist_ok=True)
+    def __init__(self, user_id=None):
+        self.user_id = user_id
+
+    def _get_db(self):
+        from database import SessionLocal
+        return SessionLocal()
+
+    def _model(self):
+        from models import File as FileModel
+        return FileModel
 
     def read(self, filepath: str) -> str:
         if not filepath:
             return "No filepath provided."
-        path = self.workspace / filepath
-        if not path.exists():
-            return f"File not found: {filepath}"
-        return path.read_text()
+        if not self.user_id:
+            return "File storage requires a user context."
+        db = self._get_db()
+        try:
+            f = db.query(self._model()).filter(
+                self._model().filename == filepath,
+                self._model().user_id == self.user_id,
+            ).first()
+            return f.content if f else f"File not found: {filepath}"
+        finally:
+            db.close()
 
     def write(self, filepath: str, content: str) -> str:
         if not filepath:
             return "No filepath provided."
-        path = self.workspace / filepath
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-        return f"Wrote {len(content)} bytes to {filepath}"
+        if not self.user_id:
+            return "File storage requires a user context."
+        db = self._get_db()
+        try:
+            existing = db.query(self._model()).filter(
+                self._model().filename == filepath,
+                self._model().user_id == self.user_id,
+            ).first()
+            if existing:
+                existing.content = content
+            else:
+                db.add(self._model()(
+                    user_id=self.user_id,
+                    filename=filepath,
+                    content=content,
+                ))
+            db.commit()
+            return f"Wrote {len(content)} bytes to {filepath}"
+        finally:
+            db.close()
 
     def list_files(self) -> str:
-        files = list(self.workspace.iterdir())
-        if not files:
-            return "Workspace is empty."
-        lines = []
-        for f in sorted(files):
-            size = f.stat().st_size
-            lines.append(f"{f.name} ({size} bytes)")
-        return "\n".join(lines)
+        if not self.user_id:
+            return "File storage requires a user context."
+        db = self._get_db()
+        try:
+            files = db.query(self._model()).filter(
+                self._model().user_id == self.user_id
+            ).all()
+            if not files:
+                return "No files found."
+            return "\n".join(
+                f"{f.filename} ({len(f.content)} bytes)"
+                for f in sorted(files, key=lambda x: x.filename)
+            )
+        finally:
+            db.close()
 
 
 class SessionHistoryTool:
@@ -127,11 +164,11 @@ class SessionHistoryTool:
 
 
 class ToolRegistry:
-    def __init__(self):
+    def __init__(self, user_id=None):
         self.search = WebSearchTool()
         self.fetch = WebFetchTool()
         self.code = CodeExecutionTool()
-        self.file = FileTool()
+        self.file = FileTool(user_id=user_id)
         self.sessions = SessionHistoryTool()
 
     def definitions(self):

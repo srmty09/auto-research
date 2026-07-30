@@ -18,8 +18,8 @@ The agent runs a **ReAct (Reason + Act)** loop powered by the Groq API. At each 
 | **Tool Layer** | Executes concrete actions: web search, code execution, file I/O |
 | **Memory** | Short-term scratchpad of steps taken during the run |
 | **Execution Loop** | Runs the Thought → Action → Observation cycle until done |
-| **Session Store** | Persists past runs with goals, success status, and logs |
-| **Streamlit UI** | Shows live reasoning trace, final answer, and session history |
+| **FastAPI Backend** | REST API with JWT auth, SQLite storage, agent orchestration |
+| **Web Frontend** | SPA with login, session management, live results |
 
 ## Tools
 
@@ -35,22 +35,49 @@ The agent runs a **ReAct (Reason + Act)** loop powered by the Groq API. At each 
 
 ## Tech Stack
 
-- **LLM**: Groq API (default: `openai/gpt-oss-120b`)
+- **LLM**: Groq API (default: `llama-3.3-70b-versatile`)
 - **Agent Loop**: Hand-rolled ReAct in Python with function calling
 - **Search**: DuckDuckGo (free, no API key needed)
 - **Code Sandbox**: Restricted subprocess with timeout
-- **UI**: Streamlit
-- **Storage**: Local JSON files for session persistence
+- **Backend**: FastAPI with SQLAlchemy + SQLite
+- **Auth**: JWT tokens (bcrypt password hashing)
+- **Frontend**: Vanilla JS SPA (dark theme)
+- **Storage**: SQLite database + JSON session fallback
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
 
-echo "GROQ_API_KEY=your_key_here" > .env
+# Edit .env with your Groq API key (already configured)
+# JWT_SECRET is pre-set but change in production
 
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://localhost:8000` in your browser.
+
+### Streamlit (legacy)
+
+The original Streamlit UI is still available at `app.py`:
+
+```bash
 streamlit run app.py
 ```
+
+## API Endpoints
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/auth/register` | No | Register a new user |
+| POST | `/api/auth/login` | No | Login, get JWT token |
+| GET | `/api/auth/me` | Yes | Current user info |
+| POST | `/api/agent/run` | Yes | Run agent on a goal |
+| POST | `/api/agent/followup` | Yes | Follow-up on a session |
+| GET | `/api/sessions` | Yes | List user's sessions |
+| GET | `/api/sessions/{id}` | Yes | Get session details |
+| DELETE | `/api/sessions/{id}` | Yes | Delete a session |
+| DELETE | `/api/sessions` | Yes | Clear all sessions |
 
 ## Evaluation
 
@@ -62,15 +89,29 @@ Run `python evaluate.py` to test the agent against 7 fixed tasks (4 simple, 3 mu
 - **Groq over Claude** for fast inference and generous free tier
 - **DuckDuckGo over Tavily** — no API key required, works out of the box
 - **Function calling** format for structured tool use rather than text-parsed ReAct
+- **FastAPI + vanilla JS** over heavier frameworks for simplicity and minimal dependencies
+- **SQLite** for zero-config database, no external services needed
 
 ## Project Structure
 
 ```
-├── app.py              # Streamlit UI
+├── main.py              # FastAPI entry point
+├── app.py               # Streamlit UI (legacy)
 ├── evaluate.py          # Evaluation runner
 ├── requirements.txt
-├── .env                 # API keys (not committed)
-├── project.md           # Original project specification
+├── .env                 # API keys + JWT secret (not committed)
+├── database.py          # SQLAlchemy setup
+├── models.py            # SQLAlchemy models (User, Session)
+├── schemas.py           # Pydantic request/response schemas
+├── auth.py              # JWT + bcrypt auth utilities
+├── routers/
+│   ├── auth.py          # Register, login, me endpoints
+│   ├── agent.py         # Run, follow-up endpoints
+│   └── sessions.py      # Session CRUD endpoints
+├── static/
+│   ├── index.html       # SPA frontend
+│   ├── style.css        # Dark theme styles
+│   └── app.js           # Frontend logic
 ├── src/
 │   ├── agent.py         # ReAct loop orchestration
 │   ├── llm.py           # Groq API client

@@ -4,11 +4,11 @@ from .config import GROQ_API_KEY, GROQ_MODEL
 
 
 class LLMClient:
-    def __init__(self):
+    def __init__(self, model=None):
         if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
             raise ValueError("GROQ_API_KEY is not set. Add your key to .env")
         self.client = Groq(api_key=GROQ_API_KEY)
-        self.model = GROQ_MODEL
+        self.model = model or GROQ_MODEL
 
     def chat(self, messages, tools=None, temperature=0.7):
         kwargs = {

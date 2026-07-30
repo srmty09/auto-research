@@ -67,9 +67,9 @@ def parse_final(text):
 
 
 class Agent:
-    def __init__(self):
-        self.llm = LLMClient()
-        self.tools = ToolRegistry()
+    def __init__(self, model=None, user_id=None):
+        self.llm = LLMClient(model=model)
+        self.tools = ToolRegistry(user_id=user_id)
 
     def run(self, goal: str, max_steps: int = 15, step_callback=None):
         memory = ConversationMemory(SYSTEM_PROMPT)
