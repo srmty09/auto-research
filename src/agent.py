@@ -1,27 +1,17 @@
 import json
-import re
+import asyncio
+from datetime import datetime
+from typing import AsyncGenerator
 
-import groq
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.exceptions import LangChainException
+from langgraph.prebuilt import create_react_agent
 
-from .llm import LLMClient
-from .tools import ToolRegistry
-from .memory import ConversationMemory
+from .llm import get_llm, get_model_name
+from .tools import get_all_tools
+from .cost_tracker import record_usage
 
-SYSTEM_PROMPT = """You are an autonomous research and task agent. You take a high-level goal from the user and complete it step by step.
-
-AVAILABLE TOOLS:
-- web_search: Search the web for current information. Input: {"query": "search query"}
-- web_fetch: Fetch and extract readable text from a specific URL. Input: {"url": "https://example.com"}
-- execute_code: Run Python code for calculations or data processing. Input: {"code": "print(1+1)"}
-- save_file: Save content to a file. Input: {"filepath": "report.md", "content": "text"}
-- read_file: Read content from a file. Input: {"filepath": "report.md"}
-- list_files: List all files in the workspace directory. Input: {}
-- get_session_history: View your past sessions (goals, success/failure, steps taken). Input: {}
-
-MEMORY:
-- You can use get_session_history to review what you accomplished in past runs
-- Use save_file to persist important findings you may need later
-- Leverage past session history to avoid repeating work
+DEFAULT_SYSTEM_PROMPT = """You are an autonomous research and task agent. You take a high-level goal from the user and complete it step by step.
 
 RULES:
 - Use tools to gather real information — do not make things up
@@ -31,275 +21,253 @@ RULES:
 - When the goal is fully achieved, provide a clear comprehensive final answer"""
 
 
-def parse_action(text):
-    lines = text.split("\n")
-    action_name = None
-    action_input_lines = []
-    in_input = False
-    for line in lines:
-        if line.startswith("Action:") and not in_input:
-            action_name = line[len("Action:"):].strip()
-        elif line.startswith("Action Input:") and not in_input:
-            in_input = True
-            rest = line[len("Action Input:"):].strip()
-            if rest:
-                action_input_lines.append(rest)
-        elif in_input:
-            if line.startswith("Thought:") or line.startswith("Final") or line.startswith("Observation") or line.startswith("Action:"):
-                in_input = False
-            else:
-                action_input_lines.append(line)
-    if action_name and action_input_lines:
-        raw = "".join(action_input_lines).strip().strip("`").strip()
-        if raw.startswith("json"):
-            raw = raw[4:].strip()
-        try:
-            args = json.loads(raw)
-        except json.JSONDecodeError:
-            args = {}
-        return action_name, args
-    return None, None
+def _extract_log(messages):
+    """Extract a step log from a list of LangGraph messages.
 
+    Each tool-use step is a pair of AIMessage (with tool_calls) followed by
+    ToolMessage(s). We pair them up into step dicts.
+    """
+    log = []
+    step_num = 0
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                step_num += 1
+                tool_name = tc["name"]
+                try:
+                    tool_input = json.loads(tc["args"]) if isinstance(tc["args"], str) else tc["args"]
+                except (json.JSONDecodeError, TypeError):
+                    tool_input = tc["args"]
 
-def parse_final(text):
-    m = re.search(r"Final Answer:\s*(.*)", text, re.DOTALL)
-    return m.group(1).strip() if m else None
+                # Find the matching ToolMessage(s) for this tool_call id
+                tool_output = ""
+                for j in range(i + 1, len(messages)):
+                    inner = messages[j]
+                    if isinstance(inner, ToolMessage) and inner.tool_call_id == tc["id"]:
+                        tool_output = inner.content
+                        break
+
+                log.append({
+                    "step": step_num,
+                    "thought": msg.content or "",
+                    "tool": tool_name,
+                    "input": tool_input,
+                    "output": tool_output[:2000],
+                    "timestamp": datetime.now().isoformat(),
+                })
+        i += 1
+    return log
 
 
 class Agent:
-    def __init__(self, model=None, user_id=None):
-        self.llm = LLMClient(model=model)
-        self.tools = ToolRegistry(user_id=user_id)
+    def __init__(self, model=None, user_id=None, session_id=None, user_context=None, username=None, doc_context=None):
+        self.model = model
+        self.user_id = user_id
+        self.session_id = session_id
+        self.user_context = user_context or ""
+        self.username = username or ""
+        self.doc_context = doc_context or ""
+        self._last_state = None
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._total_tool_calls = 0
+
+    def _build_graph(self):
+        llm = get_llm(self.model)
+        tools = get_all_tools(self.user_id, session_id=self.session_id)
+        system_prompt = DEFAULT_SYSTEM_PROMPT
+        if self.user_context:
+            system_prompt += f"\n\nUser context: {self.user_context}\nAdapt your responses to match this user's role, interests, and preferences."
+        if self.doc_context:
+            system_prompt += f"\n\nThe user has uploaded the following document(s) for this chat. Use this knowledge when answering:\n\n{self.doc_context}"
+        return create_react_agent(llm, tools, prompt=system_prompt)
+
+    def _record_usage(self, messages, tool_count):
+        """Extract token usage from messages and record it."""
+        input_tokens = 0
+        output_tokens = 0
+        for msg in messages:
+            if hasattr(msg, "usage_metadata") and msg.usage_metadata:
+                input_tokens += msg.usage_metadata.get("input_tokens", 0)
+                output_tokens += msg.usage_metadata.get("output_tokens", 0)
+        if self.username and self.session_id and (input_tokens or output_tokens):
+            record_usage(
+                session_id=self.session_id,
+                user=self.username,
+                model=get_model_name(self.model),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                tool_calls=tool_count,
+            )
 
     def run(self, goal: str, max_steps: int = 15, step_callback=None):
-        memory = ConversationMemory(SYSTEM_PROMPT)
-        memory.add_user_message(goal)
-        self._last_memory = memory
+        graph = self._build_graph()
+        config = {"recursion_limit": max_steps * 2 + 5}
+        initial_state = {"messages": [HumanMessage(content=goal)]}
 
-        for step in range(1, max_steps + 1):
+        try:
+            state = asyncio.run(graph.ainvoke(initial_state, config=config))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
             try:
-                response = self.llm.chat(
-                    memory.get_messages(),
-                    tools=self.tools.definitions(),
+                state = loop.run_until_complete(
+                    graph.ainvoke(initial_state, config=config)
                 )
-            except groq.BadRequestError:
-                response = self.llm.chat(
-                    memory.get_messages(),
-                    tools=None,
-                )
+            finally:
+                loop.close()
 
-            if response.tool_calls:
-                for tc in response.tool_calls:
-                    try:
-                        args = json.loads(tc.function.arguments)
-                    except json.JSONDecodeError:
-                        args = {}
+        self._last_state = state
+        messages = state["messages"]
 
-                    result = self.tools.execute(tc.function.name, args)
+        # Extract final answer from the last AI message (no tool_calls)
+        final_answer = ""
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and not msg.tool_calls:
+                final_answer = msg.content
+                break
 
-                    step_info = {
-                        "step": step,
-                        "thought": response.content or "",
-                        "tool": tc.function.name,
-                        "input": args,
-                        "output": result[:2000],
-                    }
-                    memory.log_step(step_info)
-                    if step_callback:
-                        step_callback(step_info)
+        # Build log from state messages
+        log = _extract_log(messages)
 
-                    memory.add_assistant_message(
-                        content=response.content,
-                        tool_calls=[{
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }],
-                    )
-                    memory.add_tool_message(result, tc.id)
-                continue
+        # Record usage
+        self._record_usage(messages, len(log))
 
-            content = response.content or ""
-            final_answer = parse_final(content)
-            if final_answer:
-                step_info = {
-                    "step": step,
-                    "thought": content,
-                    "tool": None,
-                    "input": None,
-                    "output": None,
-                }
-                memory.log_step(step_info)
-                if step_callback:
-                    step_callback(step_info)
-                memory.add_assistant_message(content=content)
-                return {
-                    "success": True,
-                    "final_answer": final_answer,
-                    "steps": step,
-                    "log": memory.get_log(),
-                }
-
-            action_name, action_args = parse_action(content)
-            if action_name:
-                result = self.tools.execute(action_name, action_args)
-                observation = f"Observation: {result[:3000]}"
-
-                step_info = {
-                    "step": step,
-                    "thought": content,
-                    "tool": action_name,
-                    "input": action_args,
-                    "output": result[:2000],
-                }
-                memory.log_step(step_info)
-                if step_callback:
-                    step_callback(step_info)
-
-                memory.add_assistant_message(content=content)
-                memory.add_user_message(observation)
-            else:
-                step_info = {
-                    "step": step,
-                    "thought": content,
-                    "tool": None,
-                    "input": None,
-                    "output": None,
-                }
-                memory.log_step(step_info)
-                if step_callback:
-                    step_callback(step_info)
-                memory.add_assistant_message(content=content)
-                return {
-                    "success": True,
-                    "final_answer": content,
-                    "steps": step,
-                    "log": memory.get_log(),
-                }
+        # Fire callback for each step
+        if step_callback:
+            for entry in log:
+                step_callback(entry)
 
         return {
-            "success": False,
-            "final_answer": "Max steps reached without completing the task.",
-            "steps": max_steps,
-            "log": memory.get_log(),
+            "success": bool(final_answer),
+            "final_answer": final_answer or "Max steps reached without completing the task.",
+            "steps": len(log),
+            "log": log,
         }
 
     def continue_run(self, memory, new_message: str, max_steps: int = 10, step_callback=None):
-        self._last_memory = memory
-        memory.add_user_message(new_message)
+        graph = self._build_graph()
+        previous_messages = memory.get_messages()
+        messages = previous_messages + [HumanMessage(content=new_message)]
 
-        start_step = len(memory.get_log()) + 1
+        config = {"recursion_limit": max_steps * 2 + 5}
+        initial_state = {"messages": messages}
 
-        for step in range(start_step, start_step + max_steps):
+        try:
+            state = asyncio.run(graph.ainvoke(initial_state, config=config))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
             try:
-                response = self.llm.chat(
-                    memory.get_messages(),
-                    tools=self.tools.definitions(),
+                state = loop.run_until_complete(
+                    graph.ainvoke(initial_state, config=config)
                 )
-            except groq.BadRequestError:
-                response = self.llm.chat(
-                    memory.get_messages(),
-                    tools=None,
-                )
+            finally:
+                loop.close()
 
-            if response.tool_calls:
-                for tc in response.tool_calls:
-                    try:
-                        args = json.loads(tc.function.arguments)
-                    except json.JSONDecodeError:
-                        args = {}
+        self._last_state = state
+        new_messages = state["messages"]
 
-                    result = self.tools.execute(tc.function.name, args)
+        # Extract final answer
+        final_answer = ""
+        for msg in reversed(new_messages):
+            if isinstance(msg, AIMessage) and not msg.tool_calls:
+                final_answer = msg.content
+                break
 
-                    step_info = {
-                        "step": step,
-                        "thought": response.content or "",
-                        "tool": tc.function.name,
-                        "input": args,
-                        "output": result[:2000],
-                    }
-                    memory.log_step(step_info)
-                    if step_callback:
-                        step_callback(step_info)
+        # Build log — only include NEW steps (after the previous messages)
+        prev_count = len(previous_messages)
+        new_log = _extract_log(new_messages[prev_count:])
 
-                    memory.add_assistant_message(
-                        content=response.content,
-                        tool_calls=[{
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }],
-                    )
-                    memory.add_tool_message(result, tc.id)
-                continue
+        # Combine with existing log
+        existing_log = memory.get_log()
+        start_step = len(existing_log) + 1
+        for entry in new_log:
+            entry["step"] = start_step
+            start_step += 1
+        combined_log = existing_log + new_log
 
-            content = response.content or ""
-            final_answer = parse_final(content)
-            if final_answer:
-                step_info = {
-                    "step": step,
-                    "thought": content,
-                    "tool": None,
-                    "input": None,
-                    "output": None,
-                }
-                memory.log_step(step_info)
-                if step_callback:
-                    step_callback(step_info)
-                memory.add_assistant_message(content=content)
-                return {
-                    "success": True,
-                    "final_answer": final_answer,
-                    "steps": step,
-                    "log": memory.get_log(),
-                }
+        # Record usage
+        self._record_usage(new_messages, len(new_log))
 
-            action_name, action_args = parse_action(content)
-            if action_name:
-                result = self.tools.execute(action_name, action_args)
-                observation = f"Observation: {result[:3000]}"
-
-                step_info = {
-                    "step": step,
-                    "thought": content,
-                    "tool": action_name,
-                    "input": action_args,
-                    "output": result[:2000],
-                }
-                memory.log_step(step_info)
-                if step_callback:
-                    step_callback(step_info)
-
-                memory.add_assistant_message(content=content)
-                memory.add_user_message(observation)
-            else:
-                step_info = {
-                    "step": step,
-                    "thought": content,
-                    "tool": None,
-                    "input": None,
-                    "output": None,
-                }
-                memory.log_step(step_info)
-                if step_callback:
-                    step_callback(step_info)
-                memory.add_assistant_message(content=content)
-                return {
-                    "success": True,
-                    "final_answer": content,
-                    "steps": step,
-                    "log": memory.get_log(),
-                }
+        # Fire callback for new steps
+        if step_callback:
+            for entry in new_log:
+                step_callback(entry)
 
         return {
-            "success": False,
-            "final_answer": "Max steps reached in follow-up.",
-            "steps": start_step + max_steps - 1,
-            "log": memory.get_log(),
+            "success": bool(final_answer),
+            "final_answer": final_answer or "Max steps reached in follow-up.",
+            "steps": len(combined_log),
+            "log": combined_log,
+        }
+
+    async def arun_stream(self, goal: str, max_steps: int = 15) -> AsyncGenerator[dict, None]:
+        """Stream agent execution as SSE events via langchain astream_events."""
+        graph = self._build_graph()
+        config = {"recursion_limit": max_steps * 2 + 5}
+        initial_state = {"messages": [HumanMessage(content=goal)]}
+
+        step_num = 0
+        pending_tools: dict[str, dict] = {}  # tool_call_id -> partial step
+        final_answer = ""
+
+        try:
+            async for event in graph.astream_events(initial_state, config=config, version="v2"):
+                kind = event.get("event", "")
+
+                # Model is generating tokens
+                if kind == "on_chat_model_stream" and not event.get("name", "").endswith("tools"):
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        yield {"type": "thinking", "content": chunk.content}
+
+                # A tool call is starting
+                elif kind == "on_tool_start":
+                    tool_id = event.get("run_id", "")
+                    step_num += 1
+                    pending_tools[tool_id] = {
+                        "step": step_num,
+                        "tool": event.get("name", "unknown"),
+                        "input": event.get("data", {}).get("input", {}),
+                        "output": "",
+                    }
+                    yield {
+                        "type": "tool_start",
+                        "step": step_num,
+                        "tool": event.get("name", "unknown"),
+                        "input": event.get("data", {}).get("input", {}),
+                    }
+
+                # A tool call has finished
+                elif kind == "on_tool_end":
+                    tool_id = event.get("run_id", "")
+                    output = event.get("data", {}).get("output", "")
+                    if tool_id in pending_tools:
+                        pending_tools[tool_id]["output"] = str(output)[:2000]
+                    yield {
+                        "type": "tool_end",
+                        "step": pending_tools.get(tool_id, {}).get("step", 0),
+                        "tool": pending_tools.get(tool_id, {}).get("tool", "unknown"),
+                        "output": str(output)[:2000],
+                    }
+
+                # Graph finished
+                elif kind == "on_chain_end" and event.get("name") == "LangGraph":
+                    state = event.get("data", {}).get("output", {})
+                    if state and "messages" in state:
+                        self._last_state = state
+                        for msg in reversed(state["messages"]):
+                            if isinstance(msg, AIMessage) and not msg.tool_calls:
+                                final_answer = msg.content
+                                break
+
+        except LangChainException as e:
+            yield {"type": "error", "message": str(e)}
+            return
+
+        yield {
+            "type": "final_answer",
+            "content": final_answer or "Max steps reached without completing the task.",
+            "steps": step_num,
         }

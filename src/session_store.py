@@ -29,6 +29,7 @@ class SessionStore:
         self._load()
         session_data["id"] = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         session_data["user"] = user
+        session_data.setdefault("tags", [])
         self._sessions.append(session_data)
         self._save()
         return session_data["id"]
@@ -40,11 +41,13 @@ class SessionStore:
                 return s
         return None
 
-    def list_sessions(self, limit: int = 50, user: str = "") -> list[dict]:
+    def list_sessions(self, limit: int = 50, user: str = "", tag: str = "") -> list[dict]:
         self._load()
         filtered = self._sessions
         if user:
             filtered = [s for s in filtered if s.get("user") == user]
+        if tag:
+            filtered = [s for s in filtered if tag in s.get("tags", [])]
         return [
             {
                 "id": s["id"],
@@ -54,6 +57,7 @@ class SessionStore:
                 "time": s["time"],
                 "timestamp": s["timestamp"],
                 "user": s.get("user", ""),
+                "tags": s.get("tags", []),
             }
             for s in reversed(filtered[-limit:])
         ]
@@ -62,6 +66,24 @@ class SessionStore:
         self._load()
         self._sessions = [s for s in self._sessions if s["id"] != session_id]
         self._save()
+
+    def update_tags(self, session_id: str, tags: list[str]):
+        self._load()
+        for s in self._sessions:
+            if s["id"] == session_id:
+                s["tags"] = tags
+                self._save()
+                return True
+        return False
+
+    def get_all_tags(self, user: str = "") -> list[str]:
+        self._load()
+        tags = set()
+        for s in self._sessions:
+            if user and s.get("user") != user:
+                continue
+            tags.update(s.get("tags", []))
+        return sorted(tags)
 
     def clear_all(self):
         self._sessions = []

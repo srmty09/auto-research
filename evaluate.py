@@ -24,7 +24,7 @@ def run_evaluation():
     results = []
 
     print("=" * 60)
-    print("AGENT EVALUATION")
+    print("AGENT EVALUATION (LangGraph)")
     print("=" * 60)
 
     for task in TASKS:

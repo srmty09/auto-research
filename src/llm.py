@@ -1,20 +1,17 @@
-import json
-from groq import Groq
-from .config import GROQ_API_KEY, GROQ_MODEL
+from langchain_openai import ChatOpenAI
+from .config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 
 
-class LLMClient:
-    def __init__(self, model=None):
-        self.client = Groq(api_key=GROQ_API_KEY)
-        self.model = model or GROQ_MODEL
+def get_llm(model=None):
+    """Return a ChatOpenAI instance configured for the DeepSeek API."""
+    return ChatOpenAI(
+        model=model or DEEPSEEK_MODEL,
+        api_key=DEEPSEEK_API_KEY,
+        base_url=DEEPSEEK_BASE_URL,
+        temperature=0.7,
+    )
 
-    def chat(self, messages, tools=None, temperature=0.7):
-        kwargs = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-        }
-        if tools:
-            kwargs["tools"] = tools
-        response = self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message
+
+def get_model_name(model=None):
+    """Return the resolved model name."""
+    return model or DEEPSEEK_MODEL
