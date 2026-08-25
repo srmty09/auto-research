@@ -22,11 +22,6 @@ RULES:
 
 
 def _extract_log(messages):
-    """Extract a step log from a list of LangGraph messages.
-
-    Each tool-use step is a pair of AIMessage (with tool_calls) followed by
-    ToolMessage(s). We pair them up into step dicts.
-    """
     log = []
     step_num = 0
     i = 0
@@ -41,7 +36,6 @@ def _extract_log(messages):
                 except (json.JSONDecodeError, TypeError):
                     tool_input = tc["args"]
 
-                # Find the matching ToolMessage(s) for this tool_call id
                 tool_output = ""
                 for j in range(i + 1, len(messages)):
                     inner = messages[j]
@@ -85,7 +79,6 @@ class Agent:
         return create_react_agent(llm, tools, prompt=system_prompt)
 
     def _record_usage(self, messages, tool_count):
-        """Extract token usage from messages and record it."""
         input_tokens = 0
         output_tokens = 0
         for msg in messages:
@@ -121,17 +114,14 @@ class Agent:
         self._last_state = state
         messages = state["messages"]
 
-        # Extract final answer from the last AI message (no tool_calls)
         final_answer = ""
         for msg in reversed(messages):
             if isinstance(msg, AIMessage) and not msg.tool_calls:
                 final_answer = msg.content
                 break
 
-        # Build log from state messages
         log = _extract_log(messages)
 
-        # Record usage
         self._record_usage(messages, len(log))
 
         # Fire callback for each step
@@ -168,18 +158,15 @@ class Agent:
         self._last_state = state
         new_messages = state["messages"]
 
-        # Extract final answer
         final_answer = ""
         for msg in reversed(new_messages):
             if isinstance(msg, AIMessage) and not msg.tool_calls:
                 final_answer = msg.content
                 break
 
-        # Build log — only include NEW steps (after the previous messages)
         prev_count = len(previous_messages)
         new_log = _extract_log(new_messages[prev_count:])
 
-        # Combine with existing log
         existing_log = memory.get_log()
         start_step = len(existing_log) + 1
         for entry in new_log:
@@ -187,10 +174,8 @@ class Agent:
             start_step += 1
         combined_log = existing_log + new_log
 
-        # Record usage
         self._record_usage(new_messages, len(new_log))
 
-        # Fire callback for new steps
         if step_callback:
             for entry in new_log:
                 step_callback(entry)
@@ -216,13 +201,11 @@ class Agent:
             async for event in graph.astream_events(initial_state, config=config, version="v2"):
                 kind = event.get("event", "")
 
-                # Model is generating tokens
                 if kind == "on_chat_model_stream" and not event.get("name", "").endswith("tools"):
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
                         yield {"type": "thinking", "content": chunk.content}
 
-                # A tool call is starting
                 elif kind == "on_tool_start":
                     tool_id = event.get("run_id", "")
                     step_num += 1
@@ -239,7 +222,6 @@ class Agent:
                         "input": event.get("data", {}).get("input", {}),
                     }
 
-                # A tool call has finished
                 elif kind == "on_tool_end":
                     tool_id = event.get("run_id", "")
                     output = event.get("data", {}).get("output", "")
@@ -252,7 +234,6 @@ class Agent:
                         "output": str(output)[:2000],
                     }
 
-                # Graph finished
                 elif kind == "on_chain_end" and event.get("name") == "LangGraph":
                     state = event.get("data", {}).get("output", {})
                     if state and "messages" in state:

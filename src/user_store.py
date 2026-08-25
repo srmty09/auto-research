@@ -47,7 +47,6 @@ def login(username: str, password: str) -> dict | None:
         return None
     if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
         return None
-    # Ensure profile exists (migrate old users)
     if "profile" not in user:
         user["profile"] = {
             "name": "",

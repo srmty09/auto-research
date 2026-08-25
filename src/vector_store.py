@@ -55,12 +55,8 @@ def _split_text(text: str, max_len: int = 1000, overlap: int = 100) -> list[str]
     return chunks
 
 
-# ---------------------------------------------------------------------------
-# Shared collection (user-uploaded docs, explicit saves)
-# ---------------------------------------------------------------------------
 
 def add_document(content: str, metadata: dict = None):
-    """Add a document to the shared collection."""
     store = _get_store()
     meta = metadata or {}
     chunks = _split_text(content, max_len=1000, overlap=100)
@@ -71,8 +67,6 @@ def add_document(content: str, metadata: dict = None):
 
 
 def upload_and_index(filename: str, content_bytes: bytes) -> dict:
-    """Extract text from uploaded file and index into shared collection.
-    Returns extracted text for immediate use in chat context."""
     text = extract_text(filename=filename, content_bytes=content_bytes)
     if not text or not text.strip():
         return {"success": False, "message": "No text content found in file"}
@@ -82,7 +76,7 @@ def upload_and_index(filename: str, content_bytes: bytes) -> dict:
         "filename": filename,
         "chars": len(text),
         "chunks": count,
-        "text": text[:8000],  # Return extracted text for chat injection
+        "text": text[:8000],  
     }
 
 
@@ -98,10 +92,6 @@ def list_indexed_docs() -> list[dict]:
         docs[title]["chunks"] += 1
     return list(docs.values())
 
-
-# ---------------------------------------------------------------------------
-# Session collections (agent memory, per-session)
-# ---------------------------------------------------------------------------
 
 def add_session_memory(session_id: str, content: str, goal: str = ""):
     """Save agent findings to a per-session collection."""
@@ -131,16 +121,10 @@ def list_session_docs(session_id: str) -> list[dict]:
     return list(docs.values())
 
 
-# ---------------------------------------------------------------------------
-# Search (across all collections)
-# ---------------------------------------------------------------------------
 
 def search(query: str, k: int = 5, session_id: str = None) -> list[dict]:
-    """Search vector store. If session_id given, search session + shared.
-    Otherwise search shared only."""
     results = []
 
-    # Search shared collection
     store = _get_store()
     if store._collection.count() > 0:
         shared = store.similarity_search_with_score(query, k=k)
@@ -152,7 +136,6 @@ def search(query: str, k: int = 5, session_id: str = None) -> list[dict]:
                 "source": "shared",
             })
 
-    # Search session collection
     if session_id:
         sstore = _get_session_store(session_id)
         if sstore._collection.count() > 0:
@@ -165,14 +148,10 @@ def search(query: str, k: int = 5, session_id: str = None) -> list[dict]:
                     "source": "session",
                 })
 
-    # Sort by score descending, return top k
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:k]
 
 
-# ---------------------------------------------------------------------------
-# File extraction
-# ---------------------------------------------------------------------------
 
 def extract_text(file_path: str = "", content_bytes: bytes = None, filename: str = "") -> str:
     name = filename or file_path

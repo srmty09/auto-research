@@ -40,14 +40,11 @@ def record_usage(
     output_tokens: int,
     tool_calls: int = 0,
 ):
-    """Record token usage for a session."""
     data = _load()
     
-    # Calculate cost
     costs = MODEL_COSTS.get(model, MODEL_COSTS["deepseek-v4-flash"])
     cost = (input_tokens * costs["input"] + output_tokens * costs["output"]) / 1_000_000
     
-    # Session record
     if session_id not in data["sessions"]:
         data["sessions"][session_id] = {
             "user": user,
@@ -69,7 +66,6 @@ def record_usage(
     s["model"] = model
     s["last_used"] = datetime.now().isoformat()
     
-    # User totals
     if user not in data["users"]:
         data["users"][user] = {
             "total_input_tokens": 0,
@@ -109,7 +105,6 @@ def get_user_usage(user: str) -> dict:
 
 
 def format_cost(cost: float) -> str:
-    """Format cost as readable string."""
     if cost < 0.01:
         return f"${cost:.4f}"
     elif cost < 1:

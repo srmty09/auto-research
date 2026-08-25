@@ -14,7 +14,6 @@ WORKSPACE_DIR.mkdir(exist_ok=True)
 
 
 def _search_exa(query: str, num_results: int = 5) -> str | None:
-    """Primary search via Exa (semantic search with content extraction)."""
     from .config import EXA_API_KEY
     if not EXA_API_KEY:
         return None
@@ -42,7 +41,6 @@ def _search_exa(query: str, num_results: int = 5) -> str | None:
 
 
 def _search_duckduckgo(query: str, max_results: int = 5) -> str | None:
-    """Fallback search via DuckDuckGo (with threading timeout)."""
     import threading
 
     result_holder = [None]
@@ -74,8 +72,6 @@ def _search_duckduckgo(query: str, max_results: int = 5) -> str | None:
 
 
 def _search_brave_fallback(query: str, num_results: int = 5) -> str | None:
-    """Fallback: use Brave Search API via httpx (free tier: 2000 queries/mo)."""
-    # Only works if BRAVE_API_KEY is set
     from .config import BRAVE_API_KEY
     if not BRAVE_API_KEY:
         return None
@@ -108,17 +104,14 @@ def _search_brave_fallback(query: str, num_results: int = 5) -> str | None:
 def web_search(query: str) -> str:
     """Search the web for current information on any topic.
     Search order: Exa (semantic) → DuckDuckGo → Brave Search."""
-    # 1. Try Exa first (best quality, semantic search)
     result = _search_exa(query)
     if result:
         return result
 
-    # 2. Try DuckDuckGo (free, no API key needed)
     result = _search_duckduckgo(query)
     if result:
         return f"[via DuckDuckGo]\n{result}"
 
-    # 3. Try Brave Search (if API key is set)
     result = _search_brave_fallback(query)
     if result:
         return f"[via Brave Search]\n{result}"
@@ -154,17 +147,13 @@ def web_fetch(url: str) -> str:
 
 
 def _get_python_repl():
-    """Get a LangChain PythonREPLTool instance."""
     from langchain_experimental.tools.python.tool import PythonREPLTool
     return PythonREPLTool()
 
 
-# Module-level tool instance for the agent
 _execute_code_tool = None
 
 def execute_code(code: str) -> str:
-    """Execute Python code for calculations or data processing.
-    Uses LangChain's PythonREPLTool which runs code in a subprocess."""
     global _execute_code_tool
     if _execute_code_tool is None:
         _execute_code_tool = _get_python_repl()
@@ -173,7 +162,6 @@ def execute_code(code: str) -> str:
         return str(result) if result else "(no output)"
     except Exception as e:
         err = str(e)
-        # Filter common noise
         err_lines = [l for l in err.split("\n") if l.strip() and "warning" not in l.lower()]
         return "Error: " + "\n".join(err_lines[-5:]) if err_lines else f"Error: {e}"
 
@@ -187,13 +175,11 @@ def make_save_file(user_id=None, session_id=None):
         target = WORKSPACE_DIR / filepath
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
-        # Index into shared collection for future search
         try:
             from .vector_store import add_document
             add_document(content, metadata={"title": filepath, "source": "file"})
         except Exception:
             pass
-        # Also save to session memory if session is active
         if session_id:
             try:
                 from .vector_store import add_session_memory
@@ -285,7 +271,6 @@ def make_vector_search(session_id=None):
 
 
 def get_all_tools(user_id=None, session_id=None):
-    """Return all LangChain tools for the agent, with user-scoped file tools."""
     python_tool = _get_python_repl()
     return [
         web_search,

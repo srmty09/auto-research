@@ -10,7 +10,6 @@ class ConversationMemory:
         return list(self.messages)
 
     def set_messages(self, messages):
-        """Set messages from a LangGraph state."""
         self.messages = list(messages)
 
     def get_log(self):
